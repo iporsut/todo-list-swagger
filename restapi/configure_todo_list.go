@@ -5,18 +5,20 @@ package restapi
 import (
 	"crypto/tls"
 	"net/http"
-	"sync"
-	"sync/atomic"
 
 	"github.com/go-openapi/swag"
+	"github.com/jinzhu/gorm"
 
 	errors "github.com/go-openapi/errors"
 	runtime "github.com/go-openapi/runtime"
 	middleware "github.com/go-openapi/runtime/middleware"
 
+	"todo-list/dbmodels"
 	"todo-list/models"
 	"todo-list/restapi/operations"
 	"todo-list/restapi/operations/todos"
+
+	_ "github.com/jinzhu/gorm/dialects/postgres"
 )
 
 //go:generate swagger generate server --target ../../todo-list --name TodoList --spec ../swagger.yml
@@ -25,26 +27,19 @@ func configureFlags(api *operations.TodoListAPI) {
 	// api.CommandLineOptionsGroups = []swag.CommandLineOptionsGroup{ ... }
 }
 
-var items = make(map[int64]*models.Item)
-var lastID int64
-
-var itemsLock = &sync.Mutex{}
-
-func newItemID() int64 {
-	return atomic.AddInt64(&lastID, 1)
-}
-
 func addItem(item *models.Item) error {
 	if item == nil {
 		return errors.New(500, "item must be present")
 	}
 
-	itemsLock.Lock()
-	defer itemsLock.Unlock()
-
-	newID := newItemID()
-	item.ID = newID
-	items[newID] = item
+	var dbItem dbmodels.Item
+	if item.Description != nil {
+		dbItem.Description = dbmodels.NullString(*item.Description)
+	}
+	dbItem.Completed = item.Completed
+	if err := db.Create(&dbItem).Error; err != nil {
+		return errors.New(500, "cannot create new item: "+err.Error())
+	}
 
 	return nil
 }
@@ -54,47 +49,66 @@ func updateItem(id int64, item *models.Item) error {
 		return errors.New(500, "item must be present")
 	}
 
-	itemsLock.Lock()
-	defer itemsLock.Unlock()
-
-	_, exists := items[id]
-	if !exists {
+	var dbItem dbmodels.Item
+	if err := db.Find(&dbItem, id).Error; err != nil {
 		return errors.NotFound("not found: item %d", id)
 	}
-	item.ID = id
-	items[id] = item
+
+	if item.Description != nil {
+		dbItem.Description = dbmodels.NullString(*item.Description)
+	}
+	dbItem.Completed = item.Completed
+	if err := db.Save(&dbItem).Error; err != nil {
+		return errors.New(500, "cannot update item %d: "+err.Error(), id)
+	}
 
 	return nil
 }
 
 func deleteItem(id int64) error {
-	itemsLock.Lock()
-	defer itemsLock.Unlock()
-
-	_, exists := items[id]
-	if !exists {
+	var dbItem dbmodels.Item
+	if err := db.Find(&dbItem, id).Error; err != nil {
 		return errors.NotFound("not found: item %d", id)
 	}
 
-	delete(items, id)
+	if err := db.Delete(&dbItem).Error; err != nil {
+		return errors.New(500, "cannot delete item %d: "+err.Error(), id)
+	}
+
 	return nil
 }
 
 func allItems(since int64, limit int32) (result []*models.Item) {
 	result = make([]*models.Item, 0)
-	for id, item := range items {
-		if len(result) >= int(limit) {
-			return
+	var dbItems []dbmodels.Item
+	if err := db.Limit(limit).Offset(since).Find(&dbItems).Error; err != nil {
+		return
+	}
+
+	for _, v := range dbItems {
+		var item models.Item
+		item.ID = v.ID
+		if v.Description.Valid {
+			s := v.Description.String
+			item.Description = &s
 		}
-		if since == 0 || id > since {
-			result = append(result, item)
-		}
+		item.Completed = v.Completed
+		result = append(result, &item)
 	}
 	return
 }
 
-func configureAPI(api *operations.TodoListAPI) http.Handler {
+var db *gorm.DB
 
+func configureAPI(api *operations.TodoListAPI) http.Handler {
+	var err error
+	db, err = gorm.Open("postgres", "postgres://weerasak@localhost/todo_list?sslmode=disable")
+	if err != nil {
+		panic("failed to connect database")
+	}
+
+	// Migrate the schema
+	db.AutoMigrate(&dbmodels.Item{})
 	// configure the api here
 	api.ServeError = errors.ServeError
 
