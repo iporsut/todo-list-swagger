@@ -12,5 +12,5 @@ require (
 	github.com/go-openapi/validate v0.19.4
 	github.com/jessevdk/go-flags v1.4.0
 	github.com/jinzhu/gorm v1.9.11
-	golang.org/x/net v0.7.0
+	golang.org/x/net v0.17.0
 )
